@@ -1,0 +1,15 @@
+# 忽略 Python 虚拟环境
+venv/
+.venv/
+env/
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 忽略前端依赖
+node_modules/
+
+# 忽略编辑器配置
+.idea/
+.vscode/
