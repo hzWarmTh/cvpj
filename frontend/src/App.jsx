@@ -9,6 +9,10 @@ export default function App() {
   const [status, setStatus] = useState('idle'); // idle | connecting | running | error
   const [message, setMessage] = useState('');
   const [instruction, setInstruction] = useState('');
+  const [targetInput, setTargetInput] = useState('cell phone');
+  const [targetObject, setTargetObject] = useState('cell phone');
+  const [isSettingTarget, setIsSettingTarget] = useState(false);
+  const [targetDirty, setTargetDirty] = useState(false);
 
   // ---- TTS 语音播报（仅在指令变化时触发，每条读两遍） ----
   const speak = useCallback((text) => {
@@ -27,8 +31,48 @@ export default function App() {
     window.speechSynthesis.speak(utt2);
   }, []);
 
+  // ---- 提交目标物体（检测前设置） ----
+  const handleApplyTarget = useCallback(async () => {
+    const nextTarget = targetInput.trim();
+    if (!nextTarget) {
+      setMessage('目标物体不能为空');
+      return;
+    }
+
+    setIsSettingTarget(true);
+    setMessage('正在设置目标物体...');
+
+    try {
+      const res = await fetch('http://localhost:8000/set-target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: nextTarget }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const appliedTarget = (data.target || nextTarget).trim();
+      setTargetObject(appliedTarget);
+      setTargetInput(appliedTarget);
+      setTargetDirty(false);
+      setMessage(`目标已设置为: ${appliedTarget}`);
+    } catch (err) {
+      setMessage(`设置目标失败，请确认后端可用 (${err.message})`);
+    } finally {
+      setIsSettingTarget(false);
+    }
+  }, [targetInput]);
+
   // ---- 开始 ----
   const handleStart = useCallback(() => {
+    if (targetDirty) {
+      setMessage('请先点击“应用目标”，再开始检测');
+      return;
+    }
+
     setStatus('connecting');
     setMessage('正在连接后端（DroidCam 摄像头）…');
 
@@ -41,13 +85,17 @@ export default function App() {
     };
 
     ws.onmessage = (event) => {
-      // 后端返回 JSON: {image, instruction}
+      // 后端返回 JSON: {image, display_instruction, speech_instruction}
       try {
         const data = JSON.parse(event.data);
         setDisplayImage(data.image);
-        setInstruction(data.instruction || '');
-        // 仅当指令变化时语音播报（每条读两遍）
-        speak(data.instruction);
+        setInstruction(data.display_instruction || data.instruction || '');
+
+        // 语音播报仅使用冷却后的 speech_instruction
+        const speechInstruction = data.speech_instruction || '';
+        if (speechInstruction) {
+          speak(speechInstruction);
+        }
       } catch {
         // 兼容纯 Base64 回退
         setDisplayImage(event.data);
@@ -62,7 +110,7 @@ export default function App() {
     ws.onclose = () => {
       setStatus((prev) => (prev === 'error' ? 'error' : 'idle'));
     };
-  }, [speak]);
+  }, [speak, targetDirty]);
 
   // ---- 停止 ----
   const handleStop = useCallback(() => {
@@ -87,6 +135,7 @@ export default function App() {
 
   // ---- UI ----
   const isRunning = status === 'running' || status === 'connecting';
+  const canEditTarget = !isRunning && !isSettingTarget;
 
   return (
     <div className="app-container">
@@ -117,6 +166,41 @@ export default function App() {
       {/* 右侧：控制面板 */}
       <div className="control-panel">
         <h1 className="app-title">视觉辅助系统</h1>
+
+        <div className="target-card">
+          <h3>目标物体</h3>
+          <div className="target-row">
+            <input
+              className="target-input"
+              type="text"
+              value={targetInput}
+              onChange={(e) => {
+                setTargetInput(e.target.value);
+                setTargetDirty(true);
+              }}
+              placeholder="例如: cup / bottle / cell phone"
+              disabled={!canEditTarget}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canEditTarget) {
+                  handleApplyTarget();
+                }
+              }}
+            />
+            <button
+              className="btn btn-apply"
+              onClick={handleApplyTarget}
+              disabled={!canEditTarget}
+            >
+              {isSettingTarget ? '设置中…' : '应用目标'}
+            </button>
+          </div>
+          <p className="target-tip">
+            当前目标: <strong>{targetObject}</strong>
+          </p>
+          {targetDirty && !isRunning && (
+            <p className="target-warning">你修改了目标，请先应用后再开始检测。</p>
+          )}
+        </div>
 
         <div className="status-bar">
           <span className={`status-dot ${isRunning ? 'active' : ''}`} />

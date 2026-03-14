@@ -1,198 +1,188 @@
-# 视障人士视觉辅助物体抓取系统
+# 视障人士视觉辅助物体抓取系统（CVPJ）
 
-一个 B/S 架构的视觉辅助系统，帮助视障用户通过实时语音引导准确抓取物体。
+本项目是一个前后端分离的实时视觉辅助系统，目标是帮助视障用户在摄像头画面中定位目标物体，并通过语音指令引导手部靠近并抓取。
+
+当前实现以 DroidCam 作为视频源：后端直接拉取手机摄像头视频流，执行目标检测、手部检测与空间引导，再将标注画面和文字指令通过 WebSocket 推送给前端；前端负责展示画面并用浏览器 TTS 播报指令。
+
+## 这个项目在做什么
+
+系统核心能力如下：
+
+1. 识别目标物体
+- 使用 YOLOv8 检测画面中的物体，并锁定指定目标（默认是 cell phone）。
+
+2. 跟踪手部位置
+- 使用 MediaPipe Hands 检测手部关键点，计算手部中心。
+
+3. 估计前后深度关系
+- 使用 MiDaS Small 做单目深度估计，判断手相对目标是更靠前还是更靠后。
+
+4. 生成引导指令
+- 按优先级先判断前后（Move Forward / Move Backward），再判断左右上下（Move Left / Move Right / Move Up / Move Down），接近后提示 Grasp。
+
+5. 防抖与冷却
+- 指令需连续稳定多帧才发送，且相同指令有冷却时间，减少语音抖动和重复轰炸。
+
+6. 可视化与语音反馈
+- 前端实时显示后端标注画面（目标框、手部骨骼等），并对新指令进行英文 TTS 播报（每条播报两遍）。
 
 ## 技术栈
 
 ### 后端
-- **语言**: Python 3.10+
-- **框架**: FastAPI + Uvicorn
-- **计算机视觉**: 
-  - OpenCV: 图像编解码
-  - MediaPipe: 手部关键点检测
-  - YOLOv8: 物体检测
-- **通信**: WebSocket 实时通信
+- Python 3.10+
+- FastAPI + Uvicorn
+- OpenCV
+- MediaPipe
+- Ultralytics YOLOv8
+- PyTorch（用于 YOLO 与 MiDaS）
+- WebSocket 实时通信
 
 ### 前端
-- **框架**: React 18
-- **构建工具**: Vite
-- **样式**: Tailwind CSS
-- **核心库**:
-  - react-webcam: 摄像头采集
-  - WebSocket: 实时数据传输
-  - Browser TTS: 语音合成
+- React 18 + Vite
+- CSS
+- WebSocket
+- Browser SpeechSynthesis（浏览器 TTS）
 
 ## 项目结构
 
-```
-.
-├── backend/                    # 后端目录
-│   ├── main.py                # FastAPI 入口应用
-│   └── requirements.txt        # Python 依赖
-├── frontend/                   # 前端目录
-│   ├── src/
-│   │   ├── App.jsx            # 主应用组件
-│   │   ├── App.css            # 应用样式
-│   │   ├── main.jsx           # React 入口
-│   │   └── index.css          # 全局样式
-│   ├── public/
-│   │   └── index.html         # HTML 模板
-│   ├── package.json           # npm 依赖
-│   ├── vite.config.js         # Vite 配置
-│   ├── tailwind.config.js     # Tailwind 配置
-│   ├── postcss.config.js      # PostCSS 配置
-│   └── .gitignore            # Git 忽略文件
-└── README.md                  # 本文件
+```text
+cvpj/
+├─ backend/
+│  ├─ main.py               # FastAPI 服务与视觉引导主逻辑
+│  ├─ requirements.txt      # Python 依赖
+│  └─ yolov8n.pt            # YOLO 模型权重
+├─ frontend/
+│  ├─ package.json
+│  ├─ vite.config.js
+│  ├─ src/
+│  │  ├─ App.jsx            # 前端主界面与 WebSocket/TTS 逻辑
+│  │  ├─ App.css
+│  │  ├─ main.jsx
+│  │  └─ index.css
+│  └─ public/
+├─ pj_req.md                # 项目需求说明
+└─ README.md
 ```
 
-## 快速启动
+## 后端接口概览
 
-### 1. 安装后端依赖
+1. GET /
+- 健康检查。
 
-```bash
-cd backend
-pip install -r requirements.txt
-```
+2. POST /set-target
+- 设置全局目标物体。
+- 请求示例：
 
-> **注意**: 首次运行时，YOLOv8 模型会自动下载 (~100MB)
-
-### 2. 启动后端服务
-
-```bash
-cd backend
-python main.py
-```
-
-后端将在 `http://localhost:8000` 启动。你可以访问 `http://localhost:8000/docs` 查看 API 文档。
-
-### 3. 安装前端依赖
-
-在新的终端窗口：
-
-```bash
-cd frontend
-npm install
-```
-
-### 4. 启动前端开发服务器
-
-```bash
-cd frontend
-npm run dev
-```
-
-前端将在 `http://localhost:3000` 启动。
-
-## 使用流程
-
-1. **访问前端**: 打开浏览器访问 `http://localhost:3000`
-2. **允许权限**: 允许网页访问摄像头和麦克风
-3. **设置目标**: 在控制面板输入要抓取的物体名称（如 "cup", "bottle" 等）
-4. **开始引导**: 点击"开始引导"按钮
-5. **按照指导**: 根据语音提示移动手部，靠近目标物体
-6. **执行抓取**: 听到"现在可以抓取了"提示后进行抓取
-
-## API 接口
-
-### 设置目标物体
-
-```
-POST /set-target
-Content-Type: application/json
-
+```json
 {
   "target": "cup"
 }
 ```
 
-### WebSocket 通信
+3. WebSocket /ws/video（前端当前在用）
+- 后端主动从 DroidCam 拉流。
+- 返回：
 
-```
-ws://localhost:8000/ws/guidance
-```
-
-**发送数据**:
-```json
-{
-  "frame": "data:image/jpeg;base64,..."
-}
-```
-
-**接收数据**:
 ```json
 {
   "image": "data:image/jpeg;base64,...",
-  "command": "move_left",
-  "message": "请向左移动你的手。",
-  "target": "cup",
-  "frame_info": {
-    "target": {
-      "center_x": 320,
-      "center_y": 240,
-      "confidence": 0.95
-    },
-    "hand": {
-      "center_x": 350,
-      "center_y": 200,
-      "detected": true
-    }
-  }
+  "instruction": "Move Left",
+  "display_instruction": "Move Left",
+  "speech_instruction": "Move Left"
 }
 ```
 
-## 生产环境构建
+字段说明：
+- display_instruction：每帧返回，用于前端持续显示当前指令。
+- speech_instruction：仅在稳定且通过冷却后返回，用于语音播报。
 
-### 前端构建
+4. WebSocket /ws/guidance（保留接口）
+- 客户端上传 frame，后端返回检测结果与指令。
+
+## 数据流（当前实际运行路径）
+
+1. 前端连接 ws://localhost:8000/ws/video。
+2. 后端从 main.py 中配置的 DroidCam 地址读取视频帧。
+3. 后端进行 YOLO + MediaPipe + MiDaS 推理。
+4. 后端输出带标注的图像和引导指令。
+5. 前端渲染图像，并对新指令进行 TTS 播报。
+
+## 快速开始
+
+### 1) 后端
+
+在项目根目录执行：
+
+```bash
+cd backend
+pip install -r requirements.txt
+python main.py
+```
+
+启动后地址：
+- http://localhost:8000
+- 文档：http://localhost:8000/docs
+
+重要说明：
+- 建议在 backend 目录下启动，否则相对路径模型文件 yolov8n.pt 可能找不到。
+
+### 2) 前端
+
+新开终端，在项目根目录执行：
 
 ```bash
 cd frontend
-npm run build
+npm install
+npm run dev
 ```
 
-构建后的文件将在 `frontend/dist` 目录中。
+Vite 默认地址通常是：
+- http://localhost:5173
 
-### 后端部署
+## 运行前配置
 
-使用 Gunicorn 部署：
+请先在 backend/main.py 中确认以下配置：
 
-```bash
-pip install gunicorn
-gunicorn -w 4 -k uvicorn.workers.UvicornWorker backend.main:app --bind 0.0.0.0:8000
-```
+1. DroidCam 视频流地址
+- 变量 DROIDCAM_URL
+- 例如：http://你的手机IP:4747/video
 
-## 常见问题
+2. 目标类别
+- 默认 TARGET_OBJECT 为 cell phone
+- 可通过 POST /set-target 动态修改
 
-### WebSocket 连接失败
-- 检查后端是否正常运行
-- 确保防火墙允许 8000 端口
-- 查看浏览器控制台是否有错误信息
+3. 指令灵敏度
+- COMMAND_THRESHOLD、DEPTH_THRESHOLD、STABLE_THRESHOLD、COOLDOWN_SECONDS 可按场景微调
 
-### 摄像头权限被拒绝
-- 检查浏览器权限设置
-- 在 macOS 上，需要在"系统偏好设置 > 安全性与隐私"中授予权限
+## 当前实现与需求文档的关系
 
-### YOLOv8 模型下载缓慢
-- 可以手动下载模型: `yolo detect predict model=yolov8n.pt source=0`
-- 或修改 main.py 中的模型路径为本地路径
+- 已实现：目标检测、手部检测、实时回传、语音引导、目标切换接口。
+- 当前差异：前端主流程不是上传本地摄像头帧，而是连接 ws/video 接收后端拉取的 DroidCam 画面。
+- 这意味着：网页端不依赖 react-webcam 才能工作，但必须保证手机 DroidCam 可访问。
 
-### 语音识别不工作
-- 确保麦克风被允许
-- 在某些浏览器（如 Safari）中可能需要额外配置
+## 常见问题排查
 
-## 依赖版本
+1. 页面没有画面
+- 检查 DroidCam 是否启动，手机与电脑网络是否互通。
+- 检查 DROIDCAM_URL 是否可在浏览器直接访问。
 
-后端依赖版本详见 `backend/requirements.txt`
+2. 前端提示 WebSocket 错误
+- 确认后端已启动在 8000 端口。
+- 检查前端是否仍连接 ws://localhost:8000/ws/video。
 
-前端依赖版本详见 `frontend/package.json`
+3. 指令频繁抖动
+- 增大 STABLE_THRESHOLD。
+- 增大 COMMAND_THRESHOLD 或 DEPTH_THRESHOLD。
 
-## License
+4. 推理速度慢
+- 当前已固定使用 CPU。
+- 可降低输入分辨率、调大 YOLO_INTERVAL、或改用更高性能设备。
 
-本项目用于教学目的。
+## 依赖
 
-## 支持
+- 后端依赖见 backend/requirements.txt
+- 前端依赖见 frontend/package.json
 
-如有问题，请检查：
-1. 各依赖是否正确安装
-2. 前后端服务是否启动
-3. 浏览器控制台的错误信息
-4. 后端服务的日志输出
+## 备注
+
+本项目用于课程实践与技术演示。

@@ -35,7 +35,7 @@ FRAME_HEIGHT = 480
 DISTANCE_THRESHOLD = 50  # 像素阈值
 
 # DroidCam IP 摄像头地址
-DROIDCAM_URL = 'http://172.16.26.15:4747/video'
+DROIDCAM_URL = 'http://192.168.31.126:4747/video'
 
 # ----- 帧计数 & YOLO 缓存（每 N 帧才跑一次 YOLO） -----
 frame_count = 0
@@ -409,6 +409,8 @@ def generate_instruction(target: dict | None, hand: dict | None,
             return "Move Backward"
 
     # ---------- 第二层：X/Y轴对齐（深度合适后） ----------
+    # 第一人称 + 手机背面摄像头：
+    # dx = target_x - hand_x > 0 代表目标在手的右侧，应提示 Move Right
     dx = target["cx"] - hand["cx"]   # obj_x - hand_x
     dy = target["cy"] - hand["cy"]   # obj_y - hand_y
 
@@ -417,9 +419,9 @@ def generate_instruction(target: dict | None, hand: dict | None,
 
     # 优先处理绝对值较大的偏差
     if abs(dx) >= abs(dy):
-        if dx < -threshold:
+        if dx > threshold:
             return "Move Right"
-        elif dx > threshold:
+        elif dx < -threshold:
             return "Move Left"
     # Y 轴：图像坐标系 Y 向下为正
     if dy > threshold:
@@ -613,7 +615,8 @@ async def root():
 async def set_target(target: dict):
     """设置目标物体"""
     global TARGET_OBJECT
-    TARGET_OBJECT = target.get("target", "cell phone")
+    raw_target = target.get("target", "cell phone")
+    TARGET_OBJECT = str(raw_target).strip() or "cell phone"
     return {"status": "success", "target": TARGET_OBJECT}
 
 
@@ -708,7 +711,7 @@ async def websocket_video(websocket: WebSocket):
                 last_raw_instruction = raw_instruction
 
             # ---------- 第三步：冷却时间判断 ----------
-            instruction_to_send = ""  # 默认不发送
+            instruction_to_send = ""  # 仅用于语音播报
 
             if stable_instruction_count >= STABLE_THRESHOLD:
                 # 指令已稳定
@@ -731,7 +734,11 @@ async def websocket_video(websocket: WebSocket):
             encoded = encode_frame(frame)
             await websocket.send_json({
                 "image": encoded,
-                "instruction": instruction_to_send,
+                # 始终显示当前指令
+                "instruction": raw_instruction,
+                "display_instruction": raw_instruction,
+                # 仅在稳定并通过冷却后才播报
+                "speech_instruction": instruction_to_send,
             })
 
     except WebSocketDisconnect:
