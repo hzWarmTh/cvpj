@@ -1,4 +1,4 @@
-/* ===== 全局 ===== */
+﻿/* ===== Global ===== */
 * {
   margin: 0;
   padding: 0;
@@ -12,14 +12,14 @@ body {
   color: #333;
 }
 
-/* ===== 主容器：左右布局 ===== */
+/* ===== Main container: left-right layout ===== */
 .app-container {
   display: flex;
   height: 100vh;
   gap: 0;
 }
 
-/* ===== 左侧视频区 ===== */
+/* ===== Left video panel ===== */
 .video-panel {
   flex: 1;
   display: flex;
@@ -28,10 +28,31 @@ body {
   padding: 20px;
 }
 
+.video-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
 .panel-title {
   color: #fff;
   font-size: 18px;
-  margin-bottom: 12px;
+}
+
+.btn-rotate {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.btn-rotate:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .video-wrapper {
@@ -55,7 +76,7 @@ body {
   font-size: 16px;
 }
 
-/* ---- 画面下方指令条 ---- */
+/* ---- Command bar below video ---- */
 .video-command-bar {
   display: flex;
   align-items: center;
@@ -79,9 +100,9 @@ body {
   color: #9ca3af;
 }
 
-/* ===== 右侧控制面板 ===== */
+/* ===== Right control panel ===== */
 .control-panel {
-  width: 320px;
+  width: 340px;
   background: #fff;
   padding: 28px 24px;
   display: flex;
@@ -97,7 +118,7 @@ body {
   color: #1a1a2e;
 }
 
-/* ---- 目标物体设置 ---- */
+/* ---- Target object card ---- */
 .target-card {
   background: #eef6ff;
   border: 1px solid #dbeafe;
@@ -111,51 +132,55 @@ body {
   color: #1e3a8a;
 }
 
-.target-row {
+.target-hint {
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 8px;
+}
+
+/* ---- Object chip selectors ---- */
+.object-chips {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
-.target-input {
-  flex: 1;
-  min-width: 0;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 9px 10px;
-  font-size: 14px;
-  outline: none;
+.chip {
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1.5px solid #93c5fd;
   background: #fff;
+  color: #1e40af;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
-.target-input:focus {
+.chip:hover {
+  background: #dbeafe;
   border-color: #60a5fa;
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
 }
 
-.btn-apply {
-  flex: 0 0 auto;
-  padding: 0 12px;
+.chip-active {
   background: #2563eb;
   color: #fff;
+  border-color: #2563eb;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.35);
 }
 
-.btn-apply:hover:not(:disabled) {
+.chip-active:hover {
   background: #1d4ed8;
+  border-color: #1d4ed8;
 }
 
 .target-tip {
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: 12px;
   color: #1f2937;
 }
 
-.target-warning {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #b45309;
-}
-
-/* ---- 状态指示 ---- */
+/* ---- Status indicator ---- */
 .status-bar {
   display: flex;
   align-items: center;
@@ -177,7 +202,7 @@ body {
   box-shadow: 0 0 6px #22c55e;
 }
 
-/* ---- 消息 ---- */
+/* ---- Message ---- */
 .message {
   font-size: 13px;
   color: #555;
@@ -187,7 +212,7 @@ body {
   line-height: 1.5;
 }
 
-/* ---- 按钮组 ---- */
+/* ---- Button group ---- */
 .btn-group {
   display: flex;
   gap: 10px;
@@ -231,7 +256,7 @@ body {
   background: #dc2626;
 }
 
-/* ---- 说明卡片 ---- */
+/* ---- Info card ---- */
 .info-card {
   background: #f0f4ff;
   border-radius: 8px;
@@ -258,7 +283,7 @@ body {
   font-size: 12px;
 }
 
-/* ---- 指令卡片 ---- */
+/* ---- Command card ---- */
 .command-card {
   display: flex;
   align-items: center;
@@ -288,4 +313,3 @@ body {
   color: #a16207;
   white-space: nowrap;
 }
-
