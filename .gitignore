@@ -10,6 +10,9 @@ __pycache__/
 # 忽略前端依赖
 node_modules/
 
+# 忽略 YOLO 模型权重（ultralytics 自动下载，不需要提交）
+*.pt
+
 # 忽略编辑器配置
 .idea/
 .vscode/
