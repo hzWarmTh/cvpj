@@ -35,7 +35,7 @@ FRAME_HEIGHT = 480
 DISTANCE_THRESHOLD = 50  # 像素阈值
 
 # DroidCam IP 摄像头地址
-DROIDCAM_URL = 'http://192.168.31.126:4747/video'
+DROIDCAM_URL = 'http://10.11.235.45:4747/video'
 
 # ----- 帧计数 & YOLO 缓存（每 N 帧才跑一次 YOLO） -----
 frame_count = 0
