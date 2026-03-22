@@ -16,6 +16,7 @@ from vision import (
     find_best_target, compute_hand_center, estimate_depth, depth_guidance_reliable,
     detect_target_object, detect_hand, draw_annotations,
     get_all_detections, FrameGrabber,
+    update_grab_detection, reset_grab_state, draw_grab_success,
 )
 from guidance import (
     generate_instruction, generate_guidance_command, stabilize_instruction,
@@ -42,7 +43,10 @@ async def root():
 async def set_target(target: dict):
     """设置目标物体"""
     raw_target = target.get("target", "cell phone")
-    config.TARGET_OBJECT = str(raw_target).strip() or "cell phone"
+    new_target = str(raw_target).strip() or "cell phone"
+    if new_target != config.TARGET_OBJECT:
+        config.TARGET_OBJECT = new_target
+        reset_grab_state()
     return {"status": "success", "target": config.TARGET_OBJECT}
 
 
@@ -103,8 +107,29 @@ def _process_frame_sync(frame):
         hand_results=hand_results,
         frame_shape=(h, w),
     )
-    if target_info is not None:
+
+    # ---- 抓取检测（基于锁定位置 + 手部覆盖） ----
+    grab_state = update_grab_detection(
+        target_info=target_info,
+        hand_results=hand_results,
+        frame_shape=(h, w),
+    )
+
+    # ---- 根据抓取状态绘制 ----
+    if grab_state == "grabbed":
+        draw_grab_success(frame, config.locked_target_bbox)
+    elif target_info is not None:
         draw_target_highlight(frame, target_info)
+    elif config.locked_target_bbox is not None and grab_state == "close":
+        # 目标丢失但手正在覆盖，显示锁定位置
+        draw_target_highlight(frame, {
+            "x1": config.locked_target_bbox[0],
+            "y1": config.locked_target_bbox[1],
+            "x2": config.locked_target_bbox[2],
+            "y2": config.locked_target_bbox[3],
+            "class_name": config.TARGET_OBJECT,
+            "confidence": 0.0,
+        })
     elif config.yolo_cache is not None:
         # 锁定目标失败时再显示全部红框，避免平时界面过于拥挤
         draw_yolo_detections(frame, config.yolo_cache)
@@ -127,13 +152,18 @@ def _process_frame_sync(frame):
         if not depth_guidance_reliable(config.depth_cache, hand_center, target_info):
             current_depth_threshold = max(config.DEPTH_THRESHOLD * 1.8, 0.05)
 
-    # ---- 生成原始指令 ----
-    raw_instruction = generate_instruction(
-        target_info, hand_center,
-        config.TARGET_OBJECT, config.COMMAND_THRESHOLD,
-        depth_map=current_depth_map,
-        depth_threshold=current_depth_threshold,
-    )
+    # ---- 生成原始指令（抓取成功时直接覆盖） ----
+    if grab_state == "grabbed":
+        raw_instruction = "Object Grabbed!"
+    elif grab_state == "close":
+        raw_instruction = "Grab it now!"
+    else:
+        raw_instruction = generate_instruction(
+            target_info, hand_center,
+            config.TARGET_OBJECT, config.COMMAND_THRESHOLD,
+            depth_map=current_depth_map,
+            depth_threshold=current_depth_threshold,
+        )
 
     # ---- 防抖 + 冷却 ----
     instruction_to_send = stabilize_instruction(raw_instruction)
@@ -152,6 +182,7 @@ def _process_frame_sync(frame):
         "speech_instruction": instruction_to_send,
         "detected_objects": [obj["name"] for obj in all_objects],
         "target": config.TARGET_OBJECT,
+        "grab_state": grab_state,
     }
 
 
@@ -168,8 +199,11 @@ async def _ws_receive_loop(websocket: WebSocket):
         while True:
             msg = await websocket.receive_json()
             if "target" in msg:
-                config.TARGET_OBJECT = str(msg["target"]).strip() or config.TARGET_OBJECT
-                logger.info(f"目标已通过 WS 更新为: {config.TARGET_OBJECT}")
+                new_target = str(msg["target"]).strip() or config.TARGET_OBJECT
+                if new_target != config.TARGET_OBJECT:
+                    config.TARGET_OBJECT = new_target
+                    reset_grab_state()
+                    logger.info(f"目标已通过 WS 更新为: {config.TARGET_OBJECT}，抓取状态已重置")
             if "rotation" in msg:
                 deg = int(msg["rotation"])
                 if deg in (0, 90, 180, 270):
@@ -192,6 +226,9 @@ async def websocket_video(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("WebSocket /ws/video 客户端已连接")
+
+    # 新连接时重置抓取状态
+    reset_grab_state()
 
     # 启动帧拓取器（后台线程持续读取，只保留最新帧）
     grabber = FrameGrabber(config.DROIDCAM_URL)

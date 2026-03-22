@@ -28,7 +28,7 @@ FRAME_HEIGHT = 480
 DISTANCE_THRESHOLD = 50  # 像素阈值
 
 # --- DroidCam IP 摄像头地址 ---
-DROIDCAM_URL = 'http://192.168.31.126:4747/video'
+DROIDCAM_URL = 'http://10.11.77.167:4747/video'
 
 # --- YOLO 帧计数 & 缓存 ---
 frame_count = 0
@@ -71,3 +71,12 @@ STABLE_THRESHOLD = 10              # 连续多少帧才认为稳定
 last_sent_instruction = ""         # 上一次实际发送给前端的指令
 last_sent_time = 0.0               # 上一次发送的时间戳
 COOLDOWN_SECONDS = 3.0             # 相同指令重复发送的冷却时间（秒）
+
+# --- 抓取检测状态 ---
+locked_target_bbox = None          # 锁定的目标 bbox (x1, y1, x2, y2)，YOLO 直接检测到时更新
+locked_target_name = None          # 锁定 bbox 对应的目标名称
+grab_state = "searching"           # searching | guiding | close | grabbed
+grab_overlap_count = 0             # 手覆盖目标区域的连续帧计数
+grab_no_overlap_count = 0          # 手离开目标区域的连续帧计数（用于释放判定）
+GRAB_CONFIRM_FRAMES = 3            # 确认抓取需要的连续帧数
+GRAB_RELEASE_FRAMES = 10           # 确认释放需要的连续帧数
