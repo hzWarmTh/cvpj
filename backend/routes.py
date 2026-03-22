@@ -13,7 +13,7 @@ from models import yolo_model, hands, depth_model
 from vision import (
     decode_frame, resize_frame, encode_frame, rotate_frame,
     draw_yolo_detections, draw_hand_landmarks, draw_target_highlight,
-    find_best_target, compute_hand_center, estimate_depth,
+    find_best_target, compute_hand_center, estimate_depth, depth_guidance_reliable,
     detect_target_object, detect_hand, draw_annotations,
     get_all_detections, FrameGrabber,
 )
@@ -72,23 +72,17 @@ def _process_frame_sync(frame):
 
     # ---- 缩放到处理宽度（降低分辨率 = 大幅提速） ----
     frame = resize_frame(frame, target_width=config.PROCESS_WIDTH)
+    # 深度估计使用无标注原图，避免绘制框线污染深度结果
+    inference_frame = frame.copy()
 
     # ---- YOLOv8 物体检测（按间隔执行，其余帧复用缓存） ----
     config.frame_count += 1
     if yolo_model is not None:
         if config.frame_count % config.YOLO_INTERVAL == 1 or config.yolo_cache is None:
             try:
-                config.yolo_cache = yolo_model(frame, verbose=False, device='cpu')
+                config.yolo_cache = yolo_model(inference_frame, verbose=False, device='cpu')
             except Exception as e:
                 logger.warning(f"YOLOv8 推理出错: {e}")
-        if config.yolo_cache is not None:
-            draw_yolo_detections(frame, config.yolo_cache)
-
-    # ---- 目标锁定 ----
-    h, w = frame.shape[:2]
-    target_info = find_best_target(config.yolo_cache, config.TARGET_OBJECT)
-    if target_info is not None:
-        draw_target_highlight(frame, target_info)
 
     # ---- MediaPipe 手部检测 ----
     hand_results = None
@@ -101,6 +95,20 @@ def _process_frame_sync(frame):
     except Exception as e:
         logger.warning(f"MediaPipe 手部检测出错: {e}")
 
+    # ---- 目标锁定（带时序跟踪 + 遮挡兜底） ----
+    h, w = frame.shape[:2]
+    target_info = find_best_target(
+        config.yolo_cache,
+        config.TARGET_OBJECT,
+        hand_results=hand_results,
+        frame_shape=(h, w),
+    )
+    if target_info is not None:
+        draw_target_highlight(frame, target_info)
+    elif config.yolo_cache is not None:
+        # 锁定目标失败时再显示全部红框，避免平时界面过于拥挤
+        draw_yolo_detections(frame, config.yolo_cache)
+
     hand_center = compute_hand_center(hand_results, w, h)
 
     # ---- 深度估计（高频执行非常耗 CPU，按 DEPTH_INTERVAL 间隔执行） ----
@@ -109,16 +117,22 @@ def _process_frame_sync(frame):
             and target_info is not None
             and hand_center is not None
             and config.frame_count % config.DEPTH_INTERVAL == 1):
-        config.depth_cache = estimate_depth(frame)
-    # 仅在目标和手都存在时使用深度信息
-    current_depth_map = config.depth_cache if (target_info and hand_center) else None
+        config.depth_cache = estimate_depth(inference_frame)
+
+    # 深度软门控：可靠时按默认阈值，不可靠时抬高阈值但不完全禁用
+    current_depth_map = None
+    current_depth_threshold = config.DEPTH_THRESHOLD
+    if target_info and hand_center and config.depth_cache is not None:
+        current_depth_map = config.depth_cache
+        if not depth_guidance_reliable(config.depth_cache, hand_center, target_info):
+            current_depth_threshold = max(config.DEPTH_THRESHOLD * 1.8, 0.05)
 
     # ---- 生成原始指令 ----
     raw_instruction = generate_instruction(
         target_info, hand_center,
         config.TARGET_OBJECT, config.COMMAND_THRESHOLD,
         depth_map=current_depth_map,
-        depth_threshold=config.DEPTH_THRESHOLD,
+        depth_threshold=current_depth_threshold,
     )
 
     # ---- 防抖 + 冷却 ----

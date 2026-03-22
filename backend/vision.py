@@ -4,6 +4,7 @@
 import base64
 import logging
 import threading
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -16,6 +17,32 @@ from models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Runtime state for robust target/depth estimation
+# ---------------------------------------------------------------------------
+
+_target_track_state = {
+    "target_name": None,
+    "class_name": None,
+    "bbox": None,
+    "velocity": (0.0, 0.0),
+    "confidence": 0.0,
+    "missed": 0,
+}
+
+_depth_ema_cache = None
+
+_TRACK_MAX_MISSED = 8
+_TRACK_EMA = 0.65
+_TRACK_VEL_EMA = 0.7
+_TRACK_VEL_DAMP = 0.9
+_OCCLUSION_IOU_THRESH = 0.12
+_OCCLUSION_CENTER_RATIO = 0.55
+_DEPTH_EMA_ALPHA = 0.35
+_DEPTH_PERCENTILE_LOW = 2.0
+_DEPTH_PERCENTILE_HIGH = 98.0
 
 
 # ---------------------------------------------------------------------------
@@ -237,11 +264,13 @@ def draw_annotations(frame: np.ndarray, target_info: dict, hand_info: dict) -> n
 def estimate_depth(frame: np.ndarray) -> np.ndarray | None:
     """
     使用 MiDaS Small 对当前帧进行单目深度估计。
-    返回归一化深度图 (H, W)，值越小 = 离摄像头越近，值越大 = 越远。
+    返回归一化深度图 (H, W)，值越大 = 离摄像头越近，值越小 = 越远。
     """
     if depth_model is None or depth_transform is None:
         return None
     try:
+        global _depth_ema_cache
+
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         input_batch = depth_transform(img_rgb).to('cpu')
 
@@ -258,12 +287,28 @@ def estimate_depth(frame: np.ndarray) -> np.ndarray | None:
 
         depth_map = prediction.cpu().numpy()
 
-        # 归一化到 0~1
-        d_min, d_max = depth_map.min(), depth_map.max()
-        if d_max - d_min > 1e-6:
-            depth_map = (depth_map - d_min) / (d_max - d_min)
+        # 使用分位数做鲁棒归一化，避免极端值导致尺度抖动
+        d_low = float(np.percentile(depth_map, _DEPTH_PERCENTILE_LOW))
+        d_high = float(np.percentile(depth_map, _DEPTH_PERCENTILE_HIGH))
+        if d_high - d_low > 1e-6:
+            depth_map = np.clip(depth_map, d_low, d_high)
+            depth_map = (depth_map - d_low) / (d_high - d_low)
         else:
             depth_map = np.zeros_like(depth_map)
+
+        # 轻量空间平滑，减少局部噪声
+        depth_map = cv2.GaussianBlur(depth_map.astype(np.float32), (5, 5), 0)
+
+        # 时间维平滑，抑制帧间闪烁
+        if _depth_ema_cache is None or _depth_ema_cache.shape != depth_map.shape:
+            _depth_ema_cache = depth_map
+        else:
+            _depth_ema_cache = (
+                _DEPTH_EMA_ALPHA * depth_map
+                + (1.0 - _DEPTH_EMA_ALPHA) * _depth_ema_cache
+            )
+
+        depth_map = _depth_ema_cache
 
         return depth_map
     except Exception as e:
@@ -273,43 +318,291 @@ def estimate_depth(frame: np.ndarray) -> np.ndarray | None:
 
 def get_depth_at(depth_map: np.ndarray, cx: float, cy: float,
                  patch_size: int = 10) -> float:
-    """取 (cx, cy) 周围 patch 区域的平均深度值，避免单像素噪声影响。"""
+    """取 (cx, cy) 周围 patch 区域的稳健深度值（截尾 + 中位数）。"""
     h, w = depth_map.shape
     x, y = int(cx), int(cy)
     half = patch_size // 2
     x1 = max(0, x - half)
-    x2 = min(w, x + half)
+    x2 = min(w, x + half + 1)
     y1 = max(0, y - half)
-    y2 = min(h, y + half)
-    return float(depth_map[y1:y2, x1:x2].mean())
+    y2 = min(h, y + half + 1)
+
+    patch = depth_map[y1:y2, x1:x2]
+    values = patch[np.isfinite(patch)].reshape(-1)
+    if values.size == 0:
+        return float("nan")
+
+    if values.size < 6:
+        return float(np.median(values))
+
+    q_low, q_high = np.percentile(values, [10, 90])
+    trimmed = values[(values >= q_low) & (values <= q_high)]
+    if trimmed.size == 0:
+        trimmed = values
+
+    return float(np.median(trimmed))
+
+
+def depth_guidance_reliable(depth_map: np.ndarray, hand: dict, target: dict,
+                           patch_size: int = 14,
+                           std_threshold: float = 0.12,
+                           min_valid_ratio: float = 0.65) -> bool:
+    """评估手与目标附近深度是否稳定可靠，避免前后指令误判。"""
+    if depth_map is None or hand is None or target is None:
+        return False
+
+    h, w = depth_map.shape
+
+    def _patch_stats(cx: float, cy: float):
+        x = int(cx)
+        y = int(cy)
+        half = patch_size // 2
+        x1 = max(0, x - half)
+        x2 = min(w, x + half + 1)
+        y1 = max(0, y - half)
+        y2 = min(h, y + half + 1)
+        patch = depth_map[y1:y2, x1:x2]
+        vals = patch[np.isfinite(patch)].reshape(-1)
+        total = patch.size if patch.size > 0 else 1
+        valid_ratio = float(vals.size / total)
+        if vals.size == 0:
+            return valid_ratio, float("inf")
+        return valid_ratio, float(np.std(vals))
+
+    hand_ratio, hand_std = _patch_stats(hand["cx"], hand["cy"])
+    tgt_ratio, tgt_std = _patch_stats(target["cx"], target["cy"])
+
+    return (
+        hand_ratio >= min_valid_ratio
+        and tgt_ratio >= min_valid_ratio
+        and hand_std <= std_threshold
+        and tgt_std <= std_threshold
+    )
 
 
 # ---------------------------------------------------------------------------
 # Detection helpers
 # ---------------------------------------------------------------------------
 
-def find_best_target(yolo_results, target_name: str = "cup") -> dict | None:
-    """从 YOLO 检测结果中筛选置信度最高的目标物体。"""
-    if yolo_results is None or len(yolo_results) == 0:
+def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _bbox_diag(bbox: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = bbox
+    return float(max(1.0, ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5))
+
+
+def _bbox_iou(a: tuple[float, float, float, float],
+              b: tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+
+    area_a = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1.0, (bx2 - bx1) * (by2 - by1))
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 1e-6 else 0.0
+
+
+def _clamp_bbox(bbox: tuple[float, float, float, float],
+                frame_shape: Optional[tuple[int, int]]) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = bbox
+    if frame_shape is None:
+        return bbox
+    h, w = frame_shape
+    x1 = float(np.clip(x1, 0, w - 1))
+    x2 = float(np.clip(x2, 0, w - 1))
+    y1 = float(np.clip(y1, 0, h - 1))
+    y2 = float(np.clip(y2, 0, h - 1))
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    return x1, y1, x2, y2
+
+
+def _hand_bbox_from_results(hand_results,
+                            frame_shape: Optional[tuple[int, int]]) -> tuple[float, float, float, float] | None:
+    if hand_results is None or hand_results.multi_hand_landmarks is None:
         return None
-    detections = yolo_results[0]
+    if frame_shape is None:
+        return None
+
+    h, w = frame_shape
+    hand_landmarks = hand_results.multi_hand_landmarks[0].landmark
+    xs = [lm.x * w for lm in hand_landmarks]
+    ys = [lm.y * h for lm in hand_landmarks]
+    if not xs or not ys:
+        return None
+
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+
+    # 给手框加一点外扩，覆盖手掌运动模糊区域
+    pad_x = 0.12 * max(1.0, x2 - x1)
+    pad_y = 0.12 * max(1.0, y2 - y1)
+    bbox = (x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y)
+    return _clamp_bbox(bbox, frame_shape)
+
+
+def _target_from_bbox(bbox: tuple[float, float, float, float],
+                      class_name: str,
+                      confidence: float,
+                      tracked: bool,
+                      occluded: bool) -> dict:
+    x1, y1, x2, y2 = bbox
+    cx, cy = _bbox_center(bbox)
+    return {
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "cx": cx, "cy": cy,
+        "confidence": confidence,
+        "class_name": class_name,
+        "tracked": tracked,
+        "occluded": occluded,
+    }
+
+
+def find_best_target(yolo_results, target_name: str = "cup",
+                     hand_results=None,
+                     frame_shape: Optional[tuple[int, int]] = None) -> dict | None:
+    """筛选目标并做短时跟踪；遮挡时使用预测位置避免瞬时丢失。"""
+    global _target_track_state
+
+    normalized_target = (target_name or "").strip().lower()
+    if _target_track_state["target_name"] != normalized_target:
+        _target_track_state = {
+            "target_name": normalized_target,
+            "class_name": None,
+            "bbox": None,
+            "velocity": (0.0, 0.0),
+            "confidence": 0.0,
+            "missed": 0,
+        }
+
+    if yolo_results is None or len(yolo_results) == 0:
+        yolo_boxes = []
+        detections = None
+    else:
+        detections = yolo_results[0]
+        yolo_boxes = list(detections.boxes)
+
     best = None
-    best_conf = 0.0
-    for box in detections.boxes:
+    best_score = -1.0
+    prev_bbox = _target_track_state["bbox"]
+
+    for box in yolo_boxes:
         class_id = int(box.cls[0])
         class_name = detections.names[class_id]
-        if target_name.lower() not in class_name.lower():
+        if normalized_target and normalized_target not in class_name.lower():
             continue
+
         conf = float(box.conf[0])
-        if conf > best_conf:
-            best_conf = conf
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
+        bbox = tuple(float(v) for v in box.xyxy[0].tolist())
+
+        # 结合轨迹连续性评分，减少目标切换
+        continuity_bonus = 0.0
+        if prev_bbox is not None:
+            prev_cx, prev_cy = _bbox_center(prev_bbox)
+            cur_cx, cur_cy = _bbox_center(bbox)
+            dist = ((cur_cx - prev_cx) ** 2 + (cur_cy - prev_cy) ** 2) ** 0.5
+            norm = max(1.0, _bbox_diag(prev_bbox))
+            continuity_bonus = max(0.0, 1.0 - dist / (2.5 * norm)) * 0.25
+
+        score = conf + continuity_bonus
+        if score > best_score:
+            best_score = score
             best = {
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "cx": (x1 + x2) / 2, "cy": (y1 + y2) / 2,
-                "confidence": conf, "class_name": class_name,
+                "bbox": _clamp_bbox(bbox, frame_shape),
+                "confidence": conf,
+                "class_name": class_name,
             }
-    return best
+
+    if best is not None:
+        bbox = best["bbox"]
+        if prev_bbox is not None:
+            # 使用 EMA 平滑边界框，减少框抖动
+            bbox = tuple(
+                _TRACK_EMA * cur + (1.0 - _TRACK_EMA) * prev
+                for cur, prev in zip(bbox, prev_bbox)
+            )
+            prev_cx, prev_cy = _bbox_center(prev_bbox)
+            cur_cx, cur_cy = _bbox_center(bbox)
+            vel_old_x, vel_old_y = _target_track_state["velocity"]
+            vel_new = (cur_cx - prev_cx, cur_cy - prev_cy)
+            velocity = (
+                _TRACK_VEL_EMA * vel_old_x + (1.0 - _TRACK_VEL_EMA) * vel_new[0],
+                _TRACK_VEL_EMA * vel_old_y + (1.0 - _TRACK_VEL_EMA) * vel_new[1],
+            )
+        else:
+            velocity = (0.0, 0.0)
+
+        _target_track_state["bbox"] = _clamp_bbox(bbox, frame_shape)
+        _target_track_state["velocity"] = velocity
+        _target_track_state["confidence"] = best["confidence"]
+        _target_track_state["class_name"] = best["class_name"]
+        _target_track_state["missed"] = 0
+
+        return _target_from_bbox(
+            _target_track_state["bbox"],
+            _target_track_state["class_name"],
+            _target_track_state["confidence"],
+            tracked=False,
+            occluded=False,
+        )
+
+    # 没检测到目标，尝试使用短时预测轨迹兜底
+    if _target_track_state["bbox"] is None:
+        return None
+
+    _target_track_state["missed"] += 1
+    missed = _target_track_state["missed"]
+    if missed > _TRACK_MAX_MISSED:
+        _target_track_state["bbox"] = None
+        _target_track_state["velocity"] = (0.0, 0.0)
+        _target_track_state["confidence"] = 0.0
+        _target_track_state["class_name"] = None
+        _target_track_state["missed"] = 0
+        return None
+
+    prev_bbox = _target_track_state["bbox"]
+    vx, vy = _target_track_state["velocity"]
+    damp = _TRACK_VEL_DAMP ** missed
+    dx = vx * damp
+    dy = vy * damp
+    predicted_bbox = (prev_bbox[0] + dx, prev_bbox[1] + dy, prev_bbox[2] + dx, prev_bbox[3] + dy)
+    predicted_bbox = _clamp_bbox(predicted_bbox, frame_shape)
+
+    hand_bbox = _hand_bbox_from_results(hand_results, frame_shape)
+    occluded = False
+    if hand_bbox is not None:
+        iou = _bbox_iou(predicted_bbox, hand_bbox)
+        pcx, pcy = _bbox_center(predicted_bbox)
+        hcx, hcy = _bbox_center(hand_bbox)
+        dist = ((pcx - hcx) ** 2 + (pcy - hcy) ** 2) ** 0.5
+        occluded = iou >= _OCCLUSION_IOU_THRESH or dist <= _OCCLUSION_CENTER_RATIO * _bbox_diag(predicted_bbox)
+
+    _target_track_state["bbox"] = predicted_bbox
+    conf = float(_target_track_state["confidence"] * (0.92 ** missed))
+
+    return _target_from_bbox(
+        predicted_bbox,
+        _target_track_state["class_name"] or target_name,
+        conf,
+        tracked=True,
+        occluded=occluded,
+    )
 
 
 def find_best_target_any(yolo_results) -> dict | None:

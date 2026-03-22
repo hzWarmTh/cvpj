@@ -11,6 +11,16 @@ from vision import get_depth_at
 logger = logging.getLogger(__name__)
 
 
+# 深度方向状态：抑制 Forward/Backward 在临界深度附近来回跳变
+_depth_diff_ema = 0.0
+_depth_direction = 0  # 1=Forward, -1=Backward, 0=XY
+_DEPTH_EMA_ALPHA = 0.25
+_DEPTH_ENTER_ABS = 0.05
+_DEPTH_RELEASE_ABS = 0.03
+_DEPTH_SWITCH_ABS = 0.07
+_DEPTH_GRASP_ABS = 0.025
+
+
 # ---------------------------------------------------------------------------
 # Instruction generators
 # ---------------------------------------------------------------------------
@@ -54,31 +64,68 @@ def generate_instruction(target: dict | None, hand: dict | None,
     根据目标与手部的空间关系生成指令字符串。
     优先级：Z轴（前后） > X/Y轴（左右上下）
     """
+    global _depth_diff_ema, _depth_direction
+
     if target is None:
+        _depth_direction = 0
         return f"Target {target_name} not found"
     if hand is None:
+        _depth_direction = 0
         return "Hand not found"
+
+    depth_ema_abs = None
+    depth_ema_sign = 0
 
     # ---------- 第一层：Z轴/深度判断（优先） ----------
     if depth_map is not None:
         depth_hand = get_depth_at(depth_map, hand["cx"], hand["cy"])
         depth_obj = get_depth_at(depth_map, target["cx"], target["cy"])
-        diff = depth_hand - depth_obj
-        print(f"DEBUG: Hand Depth={depth_hand:.2f}, Obj Depth={depth_obj:.2f}, Diff={diff:.2f}")
-        logger.debug(f"[DEPTH] hand={depth_hand:.3f} obj={depth_obj:.3f} diff={diff:.3f}")
+        if np.isfinite(depth_hand) and np.isfinite(depth_obj):
+            diff = depth_hand - depth_obj
+            _depth_diff_ema = _DEPTH_EMA_ALPHA * diff + (1.0 - _DEPTH_EMA_ALPHA) * _depth_diff_ema
+            depth_ema_abs = abs(_depth_diff_ema)
+            depth_ema_sign = 1 if _depth_diff_ema > 0 else (-1 if _depth_diff_ema < 0 else 0)
 
-        if diff > depth_threshold:
-            print(f"Logic: Hand is farther (depth_hand={depth_hand:.2f} > depth_obj={depth_obj:.2f}), returning 'Move Forward'")
-            return "Move Forward"
-        elif diff < -depth_threshold:
-            print(f"Logic: Hand is closer (depth_hand={depth_hand:.2f} < depth_obj={depth_obj:.2f}), returning 'Move Backward'")
-            return "Move Backward"
+            # 只有明显深度差才进入 Z 轴指令；深度接近时快速释放回 XY
+            z_enter = max(_DEPTH_ENTER_ABS, depth_threshold * 1.8)
+            z_release = max(_DEPTH_RELEASE_ABS, depth_threshold * 1.2)
+            z_switch = max(_DEPTH_SWITCH_ABS, depth_threshold * 2.3)
+            abs_ema = depth_ema_abs
+
+            if _depth_direction == 0:
+                if abs_ema >= z_enter:
+                    # 第一人称语义：手更靠近摄像头(更大) -> 前伸；手更远 -> 回拉
+                    _depth_direction = 1 if _depth_diff_ema > 0 else -1
+            else:
+                if abs_ema <= z_release:
+                    _depth_direction = 0
+                elif _depth_direction == 1 and _depth_diff_ema < -z_switch:
+                    _depth_direction = -1
+                elif _depth_direction == -1 and _depth_diff_ema > z_switch:
+                    _depth_direction = 1
+
+            logger.debug(
+                f"[DEPTH] hand={depth_hand:.3f} obj={depth_obj:.3f} "
+                f"diff={diff:.3f} ema={_depth_diff_ema:.3f} "
+                f"enter={z_enter:.3f} release={z_release:.3f} "
+                f"switch={z_switch:.3f} dir={_depth_direction}"
+            )
+
+            if _depth_direction == 1:
+                return "Move Forward"
+            elif _depth_direction == -1:
+                return "Move Backward"
 
     # ---------- 第二层：X/Y轴对齐 ----------
     dx = target["cx"] - hand["cx"]
     dy = target["cy"] - hand["cy"]
 
     if abs(dx) <= threshold and abs(dy) <= threshold:
+        # XY 已对齐时，若深度仍未对齐则继续给前后指令，避免过早 Grasp
+        if depth_ema_abs is not None:
+            z_grasp = max(_DEPTH_GRASP_ABS, depth_threshold * 0.8)
+            if depth_ema_abs > z_grasp:
+                return "Move Forward" if depth_ema_sign > 0 else "Move Backward"
         return "Grasp"
 
     if abs(dx) >= abs(dy):
