@@ -28,7 +28,7 @@ FRAME_HEIGHT = 480
 DISTANCE_THRESHOLD = 50  # 像素阈值
 
 # --- DroidCam IP 摄像头地址 ---
-DROIDCAM_URL = 'http://10.11.68.30:4747/video'
+DROIDCAM_URL = 'http://192.168.31.126:4747/video'
 
 # --- YOLO 帧计数 & 缓存 ---
 frame_count = 0
@@ -36,7 +36,7 @@ YOLO_INTERVAL = 3          # 每 N 帧执行一次 YOLO（减小=更实时，增
 yolo_cache = None           # 缓存上一次 YOLO 检测结果
 
 # --- 深度估计间隔（MiDaS 非常耗 CPU，每 N 帧才执行一次，0=禁用） ---
-DEPTH_INTERVAL = 15
+DEPTH_INTERVAL = 6
 depth_cache = None          # 缓存的深度图
 
 # --- YOLO 绘制参数 (红色) ---
