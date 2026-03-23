@@ -20,6 +20,7 @@ from vision import (
 from guidance import (
     generate_instruction, generate_guidance_command, stabilize_instruction,
 )
+from voice import parse_intent, IntentResult
 
 logger = logging.getLogger(__name__)
 
@@ -297,3 +298,182 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket 错误: {e}")
         await websocket.close()
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — 语音交互 (/ws/voice)
+# ---------------------------------------------------------------------------
+
+# 全局唤醒状态
+_voice_awake = False
+
+
+def _generate_voice_response(intent: IntentResult, current_instruction: str) -> dict:
+    """
+    根据意图生成语音响应
+    回答完一个问题后自动休眠，等待下次唤醒
+    
+    Returns:
+        dict: {
+            'response': str,      # 要播放的响应文本
+            'action': str,        # 执行的动作
+            'target': str | None, # 选择的目标
+            'awake': bool         # 是否处于唤醒状态
+        }
+    """
+    global _voice_awake
+    
+    result = {
+        'response': '',
+        'action': 'none',
+        'target': None,
+        'awake': False  # 默认回答后休眠
+    }
+    
+    if intent.intent_type == IntentResult.WAKE:
+        _voice_awake = True
+        result['awake'] = True  # 唤醒时保持唤醒
+        result['response'] = "I'm listening"
+        result['action'] = 'wake'
+        logger.info("语音唤醒成功")
+    
+    elif intent.intent_type == IntentResult.SELECT_TARGET:
+        if intent.target:
+            config.TARGET_OBJECT = intent.target
+            result['target'] = intent.target
+            result['response'] = f"Tracking {intent.target}"
+            result['action'] = 'select_target'
+            logger.info(f"语音选择目标: {intent.target}")
+        else:
+            result['response'] = "I didn't catch that."
+        # 回答后休眠
+        _voice_awake = False
+    
+    elif intent.intent_type == IntentResult.QUERY_LOCATION:
+        target_name = intent.target or config.TARGET_OBJECT
+        if target_name:
+            if current_instruction and current_instruction not in ["", "Hand not found"]:
+                if "not found" in current_instruction.lower():
+                    result['response'] = f"I can't see the {target_name}."
+                else:
+                    result['response'] = current_instruction
+            else:
+                result['response'] = f"Looking for {target_name}."
+        else:
+            result['response'] = "What object?"
+        result['action'] = 'query_location'
+        # 回答后休眠
+        _voice_awake = False
+    
+    elif intent.intent_type == IntentResult.QUERY_GRASP:
+        if current_instruction:
+            if "grasp" in current_instruction.lower():
+                result['response'] = "Yes, you got it!"
+            elif "not found" in current_instruction.lower():
+                result['response'] = "I don't see it."
+            else:
+                result['response'] = "Not yet."
+        else:
+            result['response'] = "Not tracking."
+        result['action'] = 'query_grasp'
+        # 回答后休眠
+        _voice_awake = False
+    
+    elif intent.intent_type == IntentResult.STOP:
+        _voice_awake = False
+        result['response'] = "Okay."
+        result['action'] = 'stop'
+        logger.info("语音停止/休眠")
+    
+    else:
+        if _voice_awake:
+            result['response'] = "Say an object name or ask where it is."
+            # 没理解时也休眠
+            _voice_awake = False
+    
+    return result
+
+
+@router.websocket("/ws/voice")
+async def websocket_voice(websocket: WebSocket):
+    """
+    语音交互 WebSocket 端点（简化版）
+    
+    语音识别由浏览器 Web Speech API 完成，后端只处理意图解析
+    
+    客户端发送:
+    - {"type": "text", "text": "recognized text"}  # 浏览器识别的文本
+    - {"type": "wake"}   # 唤醒信号
+    - {"type": "sleep"}  # 休眠信号
+    
+    服务端响应:
+    - {"type": "intent", "intent": str, "response": str, "target": str, "awake": bool}
+    """
+    global _voice_awake
+    
+    await websocket.accept()
+    logger.info("WebSocket /ws/voice 客户端已连接")
+    
+    try:
+        # 发送初始状态
+        await websocket.send_json({
+            'type': 'status',
+            'awake': _voice_awake,
+            'message': 'Voice system ready. Say "Hey Tom" to wake me up.'
+        })
+        
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get('type', '')
+            
+            if msg_type == 'wake':
+                _voice_awake = True
+                logger.info("语音唤醒")
+                continue
+            
+            if msg_type == 'sleep':
+                _voice_awake = False
+                logger.info("语音休眠")
+                continue
+            
+            if msg_type == 'text':
+                text = data.get('text', '')
+                if not text:
+                    continue
+                
+                logger.info(f"收到语音文本: {text}")
+                
+                # 解析意图
+                intent = parse_intent(
+                    text,
+                    detected_objects=config.detected_objects,
+                    is_awake=_voice_awake
+                )
+                
+                # 获取当前指令
+                current_instruction = getattr(config, 'last_raw_instruction', '')
+                
+                # 生成响应
+                response = _generate_voice_response(intent, current_instruction)
+                
+                await websocket.send_json({
+                    'type': 'intent',
+                    'intent': intent.intent_type,
+                    'raw_text': intent.raw_text,
+                    'response': response['response'],
+                    'action': response['action'],
+                    'target': response['target'],
+                    'awake': response['awake']
+                })
+            
+            elif msg_type == 'ping':
+                await websocket.send_json({'type': 'pong'})
+    
+    except WebSocketDisconnect:
+        logger.info("WebSocket /ws/voice 客户端已断开")
+    except Exception as e:
+        logger.error(f"WebSocket /ws/voice 错误: {e}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
