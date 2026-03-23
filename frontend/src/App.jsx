@@ -1,5 +1,6 @@
 ﻿import { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
+import useVoiceInteraction from './useVoiceInteraction';
 
 export default function App() {
   const wsRef = useRef(null);
@@ -28,13 +29,43 @@ export default function App() {
     window.speechSynthesis.speak(utt2);
   }, []);
 
+  // ---- TTS for voice responses (single play) ----
+  const speakOnce = useCallback((text) => {
+    if (!text) return;
+    window.speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.lang = 'en-US';
+    utt.rate = 1.0;
+    window.speechSynthesis.speak(utt);
+  }, []);
+
   // ---- select target via WebSocket ----
   const selectTarget = useCallback((name) => {
+    console.log('selectTarget called with:', name);
     setTargetObject(name);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ target: name }));
+      console.log('Sent target to video WebSocket:', name);
+    } else {
+      console.log('Video WebSocket not connected');
     }
   }, []);
+
+  // ---- Voice Interaction Hook ----
+  const {
+    isListening,
+    isAwake,
+    isSpeaking,
+    isProcessing,
+    lastTranscription,
+    voiceStatus,
+    error: voiceError,
+    startListening,
+    stopListening,
+  } = useVoiceInteraction({
+    onTargetSelected: selectTarget,
+    onResponse: speakOnce,
+  });
 
   // ---- cycle rotation ----
   const cycleRotation = useCallback(() => {
@@ -77,10 +108,11 @@ export default function App() {
           }
         }
 
-        const speechInstruction = data.speech_instruction || '';
-        if (speechInstruction) {
-          speak(speechInstruction);
-        }
+        // 暂时禁用指令语音播报
+        // const speechInstruction = data.speech_instruction || '';
+        // if (speechInstruction && !isListening) {
+        //   speak(speechInstruction);
+        // }
       } catch {
         setDisplayImage(event.data);
       }
@@ -120,6 +152,23 @@ export default function App() {
 
   const isRunning = status === 'running' || status === 'connecting';
 
+  // Voice status display helper
+  const getVoiceStatusText = () => {
+    if (!isListening) return 'Voice Off';
+    if (isProcessing) return 'Processing...';
+    if (isSpeaking) return 'Listening...';
+    if (isAwake) return 'Awake - Say a command';
+    return 'Say "Hey Tom"';
+  };
+
+  const getVoiceStatusClass = () => {
+    if (!isListening) return '';
+    if (isProcessing) return 'processing';
+    if (isSpeaking) return 'speaking';
+    if (isAwake) return 'awake';
+    return 'listening';
+  };
+
   return (
     <div className="app-container">
       {/* Left: video stream */}
@@ -154,12 +203,42 @@ export default function App() {
       <div className="control-panel">
         <h1 className="app-title">Visual Assist</h1>
 
+        {/* Voice Interaction Card */}
+        <div className="voice-card">
+          <h3>🎤 Voice Control</h3>
+          <div className={`voice-status ${getVoiceStatusClass()}`}>
+            <span className="voice-indicator"></span>
+            <span>{getVoiceStatusText()}</span>
+          </div>
+          {lastTranscription && (
+            <p className="voice-transcription">
+              You said: "<em>{lastTranscription}</em>"
+            </p>
+          )}
+          {voiceError && (
+            <p className="voice-error">{voiceError}</p>
+          )}
+          <div className="voice-btn-group">
+            <button
+              className={`btn ${isListening ? 'btn-voice-active' : 'btn-voice'}`}
+              onClick={isListening ? stopListening : startListening}
+            >
+              {isListening ? '🔴 Stop Voice' : '🎤 Start Voice'}
+            </button>
+          </div>
+          <p className="voice-hint">
+            {isAwake 
+              ? 'Say an object name, or ask "Where is the [object]?" or "Did I get it?"'
+              : 'Say "Hey Tom" to wake up'}
+          </p>
+        </div>
+
         {/* Target selection */}
         <div className="target-card">
           <h3>Target Object</h3>
           {detectedObjects.length > 0 ? (
             <>
-              <p className="target-hint">Select an object to track:</p>
+              <p className="target-hint">Select an object to track (click or say its name):</p>
               <div className="object-chips">
                 {detectedObjects.map((name) => (
                   <button
@@ -223,9 +302,9 @@ export default function App() {
             <li>Backend must be running on <code>localhost:8000</code></li>
             <li>DroidCam must be active on your phone</li>
             <li>Click Start to connect</li>
-            <li>Detected objects appear as selectable buttons</li>
-            <li>Click an object name to set it as the target</li>
-            <li>Use the rotate button if the image is flipped</li>
+            <li><strong>Voice:</strong> Click "Start Voice", say "Hey Tom" to wake</li>
+            <li>Say an object name to select it, or ask where it is</li>
+            <li>Ask "Did I get it?" to check if you grabbed the object</li>
           </ol>
         </div>
       </div>

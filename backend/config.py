@@ -1,7 +1,7 @@
 """Global configuration constants and mutable runtime state."""
 
 # --- Default target ---
-TARGET_OBJECT = "cell phone"
+TARGET_OBJECT = ""
 
 # --- Image rotation (0, 90, 180, 270) ---
 ROTATION = 0
@@ -28,7 +28,7 @@ FRAME_HEIGHT = 480
 DISTANCE_THRESHOLD = 50  # 像素阈值
 
 # --- DroidCam IP 摄像头地址 ---
-DROIDCAM_URL = 'http://192.168.31.126:4747/video'
+DROIDCAM_URL = 'http://192.168.31.250:4747/video'
 
 # --- YOLO 帧计数 & 缓存 ---
 frame_count = 0
