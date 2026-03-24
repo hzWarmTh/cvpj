@@ -13,6 +13,7 @@ export default function App() {
   const [targetObject, setTargetObject] = useState('');
   const [detectedObjects, setDetectedObjects] = useState([]);
   const [rotation, setRotation] = useState(0);
+  const [grabState, setGrabState] = useState('searching');
 
   // ---- TTS (read each instruction twice) ----
   const speak = useCallback((text) => {
@@ -100,6 +101,7 @@ export default function App() {
         const data = JSON.parse(event.data);
         setDisplayImage(data.image);
         setInstruction(data.display_instruction || data.instruction || '');
+        setGrabState(data.grab_state || 'searching');
 
         if (data.detected_objects) {
           setDetectedObjects(data.detected_objects);
@@ -109,10 +111,10 @@ export default function App() {
         }
 
         // 暂时禁用指令语音播报
-        // const speechInstruction = data.speech_instruction || '';
-        // if (speechInstruction && !isListening) {
-        //   speak(speechInstruction);
-        // }
+        const speechInstruction = data.speech_instruction || '';
+        if (speechInstruction && !isListening) {
+          speak(speechInstruction);
+        }
       } catch {
         setDisplayImage(event.data);
       }
@@ -140,6 +142,7 @@ export default function App() {
     setMessage('stopped');
     setInstruction('');
     setDetectedObjects([]);
+    setGrabState('searching');
     window.speechSynthesis.cancel();
   }, []);
 
@@ -191,8 +194,9 @@ export default function App() {
           )}
         </div>
         {instruction && (
-          <div className="video-command-bar">
-            <span className="video-command-text" style={{ fontSize: '1.6rem', fontWeight: 'bold' }}>
+          <div className={`video-command-bar${grabState === 'grabbed' ? ' grabbed' : grabState === 'close' ? ' close' : ''}`}>
+            <span className={`video-command-text${grabState === 'grabbed' ? ' grabbed' : grabState === 'close' ? ' close' : ''}`}
+                  style={{ fontSize: '1.6rem', fontWeight: 'bold' }}>
               {instruction}
             </span>
           </div>
