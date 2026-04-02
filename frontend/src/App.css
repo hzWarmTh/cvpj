@@ -86,6 +86,15 @@ body {
   padding: 12px 20px;
   border-radius: 0 0 8px 8px;
   margin-top: -8px;
+  transition: background 0.3s ease;
+}
+
+.video-command-bar.grabbed {
+  background: rgba(16, 185, 129, 0.9);
+}
+
+.video-command-bar.close {
+  background: rgba(245, 158, 11, 0.85);
 }
 
 .video-command-text {
@@ -93,6 +102,15 @@ body {
   font-weight: 700;
   color: #fbbf24;
   letter-spacing: 1px;
+  transition: color 0.3s ease;
+}
+
+.video-command-text.grabbed {
+  color: #fff;
+}
+
+.video-command-text.close {
+  color: #fff;
 }
 
 .video-command-dist {

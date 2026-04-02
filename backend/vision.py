@@ -662,6 +662,184 @@ def get_all_detections(yolo_results) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Grab detection (锁定目标 + 手部覆盖 + 深度校验)
+# ---------------------------------------------------------------------------
+
+def reset_grab_state():
+    """重置抓取状态（目标切换 / 新连接时调用）。"""
+    config.locked_target_bbox = None
+    config.locked_target_name = None
+    config.grab_state = "searching"
+    config.grab_overlap_count = 0
+    config.grab_no_overlap_count = 0
+
+
+def _depth_close(depth_map, hand_cx, hand_cy, target_cx, target_cy,
+                 tolerance: float = None) -> bool:
+    """
+    判断手和目标在深度方向上是否足够接近。
+    如果没有深度图返回 False（不满足深度条件，防止误判）。
+    """
+    if depth_map is None:
+        return False
+    tol = tolerance if tolerance is not None else config.GRAB_DEPTH_TOLERANCE
+    depth_hand = get_depth_at(depth_map, hand_cx, hand_cy)
+    depth_target = get_depth_at(depth_map, target_cx, target_cy)
+    if not np.isfinite(depth_hand) or not np.isfinite(depth_target):
+        return False
+    return abs(depth_hand - depth_target) <= tol
+
+
+def update_grab_detection(target_info: dict | None,
+                          hand_results,
+                          frame_shape: tuple[int, int],
+                          depth_map: np.ndarray | None = None) -> str:
+    """
+    基于锁定目标位置 + 深度校验的抓取检测状态机。
+
+    核心思路：
+    1. YOLO 检测到目标时锁定 bbox
+    2. 手在 2D 上覆盖锁定区域 + 深度接近 + YOLO 丢失目标 → grabbed
+    3. 仅 2D 重叠但深度不够（手在上方悬停） → 不触发抓取
+
+    返回: "searching" | "guiding" | "close" | "grabbed"
+    """
+    current_target = (config.TARGET_OBJECT or "").strip().lower()
+
+    # 目标切换时重置
+    if config.locked_target_name is not None and config.locked_target_name != current_target:
+        reset_grab_state()
+
+    # 当 YOLO 直接检测到目标（非跟踪预测），更新锁定 bbox
+    if target_info is not None and not target_info.get("tracked", False):
+        config.locked_target_bbox = (
+            target_info["x1"], target_info["y1"],
+            target_info["x2"], target_info["y2"],
+        )
+        config.locked_target_name = current_target
+
+    # 没有锁定位置 → 仍在搜索
+    if config.locked_target_bbox is None:
+        config.grab_state = "searching"
+        config.grab_overlap_count = 0
+        config.grab_no_overlap_count = 0
+        return "searching"
+
+    # 获取手部 bbox
+    hand_bbox = _hand_bbox_from_results(hand_results, frame_shape)
+
+    if hand_bbox is None:
+        # 没有手：已抓取状态保持
+        if config.grab_state == "grabbed":
+            return "grabbed"
+        config.grab_overlap_count = 0
+        if config.grab_state == "close":
+            config.grab_state = "guiding"
+        return config.grab_state
+
+    locked = config.locked_target_bbox
+
+    # ---- 计算手与锁定目标的 2D 空间关系 ----
+    iou = _bbox_iou(locked, hand_bbox)
+    lcx, lcy = _bbox_center(locked)
+    hcx, hcy = _bbox_center(hand_bbox)
+    dist = ((lcx - hcx) ** 2 + (lcy - hcy) ** 2) ** 0.5
+    diag = _bbox_diag(locked)
+
+    # 手中心是否在锁定 bbox 内部
+    hand_center_inside = (
+        locked[0] <= hcx <= locked[2] and locked[1] <= hcy <= locked[3]
+    )
+
+    # 手是否在目标上方（2D 重叠）
+    hand_on_target_2d = (
+        iou >= 0.12
+        or hand_center_inside
+        or dist < diag * 0.35
+    )
+
+    # ---- 深度校验：手和目标在 Z 轴上是否接近 ----
+    depth_ok = _depth_close(depth_map, hcx, hcy, lcx, lcy)
+
+    # 目标是否被 YOLO 直接检测到
+    target_visible_yolo = (
+        target_info is not None and not target_info.get("tracked", False)
+    )
+    target_not_directly_seen = (
+        target_info is None
+        or target_info.get("tracked", False)
+        or target_info.get("occluded", False)
+    )
+
+    logger.debug(
+        f"[GRAB] iou={iou:.3f} dist={dist:.1f} diag={diag:.1f} "
+        f"inside={hand_center_inside} on2d={hand_on_target_2d} "
+        f"depth_ok={depth_ok} yolo_vis={target_visible_yolo} "
+        f"state={config.grab_state} overlap={config.grab_overlap_count}"
+    )
+
+    # ---- 状态机 ----
+    if config.grab_state == "grabbed":
+        # 已抓取，检查是否释放：手远离 + 目标重新可见
+        if target_visible_yolo and not hand_on_target_2d:
+            config.grab_no_overlap_count += 1
+            if config.grab_no_overlap_count >= config.GRAB_RELEASE_FRAMES:
+                config.grab_state = "guiding"
+                config.grab_overlap_count = 0
+                config.grab_no_overlap_count = 0
+        else:
+            config.grab_no_overlap_count = 0
+        return config.grab_state
+
+    # 未抓取：检测抓取
+    # 需要满足三个条件：2D 重叠 + 深度接近 + YOLO 看不到目标
+    if hand_on_target_2d and depth_ok and target_not_directly_seen:
+        config.grab_overlap_count += 1
+        if config.grab_overlap_count >= config.GRAB_CONFIRM_FRAMES:
+            config.grab_state = "grabbed"
+            config.grab_no_overlap_count = 0
+            logger.info("[GRAB] *** 检测到抓取成功! ***")
+            return "grabbed"
+        config.grab_state = "close"
+        return "close"
+    elif hand_on_target_2d and target_not_directly_seen:
+        # 2D 重叠但深度不够（手在上方悬停），只算 close，不累加计数
+        config.grab_overlap_count = 0
+        config.grab_state = "close"
+        return "close"
+    elif hand_on_target_2d:
+        # 手在目标上但目标仍可见
+        config.grab_overlap_count = 0
+        config.grab_state = "close"
+        return "close"
+    else:
+        config.grab_overlap_count = 0
+        config.grab_no_overlap_count = 0
+        config.grab_state = "guiding"
+        return "guiding"
+
+
+def draw_grab_success(frame: np.ndarray, bbox: tuple) -> None:
+    """绘制抓取成功的可视化效果（绿色框 + 标签）。"""
+    if bbox is None:
+        return
+    x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+    color = (0, 200, 0)  # 绿色
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 4)
+
+    label = "[GRABBED]"
+    (tw, th), baseline = cv2.getTextSize(
+        label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2,
+    )
+    cv2.rectangle(frame, (x1, y1 - th - baseline - 8),
+                  (x1 + tw + 8, y1), color, cv2.FILLED)
+    cv2.putText(frame, label, (x1 + 4, y1 - baseline - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                (255, 255, 255), 2, cv2.LINE_AA)
+
+
+# ---------------------------------------------------------------------------
 # Hand center
 # ---------------------------------------------------------------------------
 
