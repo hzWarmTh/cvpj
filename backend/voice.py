@@ -200,39 +200,24 @@ def transcribe_audio(audio_bytes: bytes) -> str:
 # 意图解析
 # ---------------------------------------------------------------------------
 
-# 唤醒词列表（更宽松的匹配）
+# 唤醒词列表（仅匹配 hi/hey/hello tom 及常见 Whisper 误识别）
 WAKE_WORDS = [
-    # 标准形式
-    "hey tom", "hi tom", "hello tom",
-    # 单词形式
-    "tom",
+    "hi tom", "hey tom", "hello tom",
     # Whisper 常见误识别变体
-    "hey time", "hi time", "hello time",
-    "hey tong", "hi tong", 
-    "hey tongue", "hey ton",
-    "hey john", "hi john",
-    "hey tim", "hi tim",
-    "hey tam", "hi tam",
-    "a tom", "eight tom",
-    "haitong", "hey tum",
-    # 其他唤醒方式
-    "wake up", "hello", "hey"
+    "hi time", "hey time", "hello time",
+    "hi tim", "hey tim",
+    "hi tam", "hey tam",
+    "hi tong", "hey tong",
 ]
 
-# 目标查询关键词
+# 目标查询关键词（支持 "where are the [object]" 和 "where is the [object]"）
 TARGET_QUERY_KEYWORDS = [
-    "where is", "where's", "find", "locate", "look for"
+    "where are the", "where are", "where is the", "where is", "where's",
 ]
 
-# 抓取查询关键词
+# 抓取查询关键词（仅支持 "did i get it"）
 GRASP_QUERY_KEYWORDS = [
-    "did i get", "do i have", "am i holding", "got it", "have it",
-    "did i grab", "did i pick", "holding"
-]
-
-# 停止/取消关键词
-STOP_KEYWORDS = [
-    "stop", "cancel", "nevermind", "never mind", "quit", "exit"
+    "did i get it", "did i get"
 ]
 
 
@@ -298,44 +283,20 @@ def parse_intent(text: str, detected_objects: list = None, is_awake: bool = Fals
     if not is_awake:
         logger.info("意图解析: 未唤醒，忽略非唤醒指令")
         return IntentResult(IntentResult.UNKNOWN, raw_text=text)
-    
-    # 2. 检查停止命令
-    for stop_word in STOP_KEYWORDS:
-        if stop_word in text_lower:
-            return IntentResult(IntentResult.STOP, raw_text=text)
-    
-    # 3. 检查抓取查询
+
+    # 2. 检查抓取查询："did i get it?"
     for keyword in GRASP_QUERY_KEYWORDS:
         if keyword in text_lower:
             return IntentResult(IntentResult.QUERY_GRASP, raw_text=text)
-    
-    # 4. 检查位置查询
-    for keyword in TARGET_QUERY_KEYWORDS:
+
+    # 3. 检查位置查询（按长度降序匹配，优先匹配最长关键词）
+    # 例如："where are the bottle"
+    for keyword in sorted(TARGET_QUERY_KEYWORDS, key=len, reverse=True):
         if keyword in text_lower:
-            # 尝试提取目标物体
             target = _extract_target_from_query(text_lower, keyword, detected_lower, object_names)
             return IntentResult(IntentResult.QUERY_LOCATION, target=target, raw_text=text)
-    
-    # 5. 检查目标选择（直接说物体名称）
-    logger.info(f"检查目标选择: text='{text_lower}', detected={detected_lower}")
-    for i, obj_lower in enumerate(detected_lower):
-        if obj_lower in text_lower:
-            logger.info(f"匹配到检测物体: {object_names[i]}")
-            return IntentResult(IntentResult.SELECT_TARGET, target=object_names[i], raw_text=text)
-    
-    # 6. 常见物体名称（即使未检测到也尝试匹配）
-    common_objects = [
-        "bottle", "cup", "phone", "cell phone", "book", "remote",
-        "mouse", "keyboard", "pen", "pencil", "glass", "mug",
-        "laptop", "bag", "wallet", "key", "keys", "scissors",
-        "tv", "television", "monitor"
-    ]
-    for obj in common_objects:
-        if obj in text_lower:
-            logger.info(f"匹配到常见物体: {obj}")
-            return IntentResult(IntentResult.SELECT_TARGET, target=obj, raw_text=text)
-    
-    logger.info("未匹配到任何物体")
+
+    logger.info("未识别到有效命令")
     return IntentResult(IntentResult.UNKNOWN, raw_text=text)
 
 

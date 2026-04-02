@@ -17,10 +17,10 @@ YOLO_MODEL_SIZE = "s"
 PROCESS_WIDTH = 480
 
 # --- 目标输出帧率（限制 WebSocket 推送频率，避免前端积压） ---
-TARGET_FPS = 15
+TARGET_FPS = 30
 
 # --- JPEG 压缩质量（1-100，越低传输越快，40 已足够清晰） ---
-JPEG_QUALITY = 40
+JPEG_QUALITY = 80
 
 # --- Frame dimensions ---
 FRAME_WIDTH = 640

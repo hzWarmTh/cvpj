@@ -2,9 +2,16 @@
 import './App.css';
 import useVoiceInteraction from './useVoiceInteraction';
 
+let _msgId = 0;
+const nextId = () => ++_msgId;
+
 export default function App() {
   const wsRef = useRef(null);
   const lastCommandRef = useRef('');
+  const chatEndRef = useRef(null);
+  // 转发 hook 暴露的 TTS 暂停/恢复函数，避免 speakOnce 与 hook 之间的循环依赖
+  const pauseForTTSRef = useRef(null);
+  const resumeFromTTSRef = useRef(null);
 
   const [displayImage, setDisplayImage] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | connecting | running | error
@@ -13,7 +20,13 @@ export default function App() {
   const [targetObject, setTargetObject] = useState('');
   const [detectedObjects, setDetectedObjects] = useState([]);
   const [rotation, setRotation] = useState(0);
+  const [chatHistory, setChatHistory] = useState([]); // [{id, role:'user'|'tom', text}]
   const [grabState, setGrabState] = useState('searching');
+
+  // auto-scroll chat to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
 
   // ---- TTS (read each instruction twice) ----
   const speak = useCallback((text) => {
@@ -30,14 +43,21 @@ export default function App() {
     window.speechSynthesis.speak(utt2);
   }, []);
 
-  // ---- TTS for voice responses (single play) ----
+  // ---- TTS for voice responses (single play) + append to chat ----
+  // 通过 ref 调用 hook 的 pause/resume，避免循环依赖
   const speakOnce = useCallback((text) => {
     if (!text) return;
     window.speechSynthesis.cancel();
+    // 暂停识别，防止 TTS 输出被麦克风录入
+    pauseForTTSRef.current?.();
     const utt = new SpeechSynthesisUtterance(text);
     utt.lang = 'en-US';
     utt.rate = 1.0;
+    utt.onend = () => resumeFromTTSRef.current?.();
+    // 若 TTS 因某种原因中断，也要恢复识别
+    utt.onerror = () => resumeFromTTSRef.current?.();
     window.speechSynthesis.speak(utt);
+    setChatHistory(prev => [...prev, { id: nextId(), role: 'tom', text }]);
   }, []);
 
   // ---- select target via WebSocket ----
@@ -63,10 +83,16 @@ export default function App() {
     error: voiceError,
     startListening,
     stopListening,
+    pauseForTTS,
+    resumeFromTTS,
   } = useVoiceInteraction({
     onTargetSelected: selectTarget,
     onResponse: speakOnce,
   });
+
+  // 将 hook 函数同步到 ref，供 speakOnce 使用（每次渲染更新）
+  pauseForTTSRef.current = pauseForTTS;
+  resumeFromTTSRef.current = resumeFromTTS;
 
   // ---- cycle rotation ----
   const cycleRotation = useCallback(() => {
@@ -146,6 +172,13 @@ export default function App() {
     window.speechSynthesis.cancel();
   }, []);
 
+  // append user utterances to chat history
+  useEffect(() => {
+    if (lastTranscription) {
+      setChatHistory(prev => [...prev, { id: nextId(), role: 'user', text: lastTranscription }]);
+    }
+  }, [lastTranscription]);
+
   // ---- cleanup on unmount ----
   useEffect(() => {
     return () => {
@@ -161,7 +194,7 @@ export default function App() {
     if (isProcessing) return 'Processing...';
     if (isSpeaking) return 'Listening...';
     if (isAwake) return 'Awake - Say a command';
-    return 'Say "Hey Tom"';
+    return 'Say "Hi Tom"';
   };
 
   const getVoiceStatusClass = () => {
@@ -205,111 +238,91 @@ export default function App() {
 
       {/* Right: control panel */}
       <div className="control-panel">
-        <h1 className="app-title">Visual Assist</h1>
+        <div className="control-header">
+          <h1 className="app-title">Visual Assist</h1>
+          <div className="status-pill">
+            <span className={"status-dot" + (isRunning ? " active" : "")} />
+            <span>{isRunning ? 'Running' : 'Stopped'}</span>
+          </div>
+        </div>
 
-        {/* Voice Interaction Card */}
-        <div className="voice-card">
-          <h3>🎤 Voice Control</h3>
-          <div className={`voice-status ${getVoiceStatusClass()}`}>
-            <span className="voice-indicator"></span>
-            <span>{getVoiceStatusText()}</span>
-          </div>
-          {lastTranscription && (
-            <p className="voice-transcription">
-              You said: "<em>{lastTranscription}</em>"
-            </p>
-          )}
-          {voiceError && (
-            <p className="voice-error">{voiceError}</p>
-          )}
-          <div className="voice-btn-group">
-            <button
-              className={`btn ${isListening ? 'btn-voice-active' : 'btn-voice'}`}
-              onClick={isListening ? stopListening : startListening}
-            >
-              {isListening ? '🔴 Stop Voice' : '🎤 Start Voice'}
-            </button>
-          </div>
-          <p className="voice-hint">
-            {isAwake 
-              ? 'Say an object name, or ask "Where is the [object]?" or "Did I get it?"'
-              : 'Say "Hey Tom" to wake up'}
-          </p>
+        {/* Start / Stop */}
+        <div className="btn-group">
+          <button className="btn btn-start" disabled={isRunning} onClick={handleStart}>
+            {status === 'connecting' ? 'Connecting...' : 'Start'}
+          </button>
+          <button className="btn btn-stop" disabled={!isRunning} onClick={handleStop}>
+            Stop
+          </button>
         </div>
 
         {/* Target selection */}
         <div className="target-card">
-          <h3>Target Object</h3>
+          <div className="target-card-header">
+            <h3>Target Object</h3>
+            {targetObject && (
+              <span className="target-badge">{targetObject}</span>
+            )}
+          </div>
           {detectedObjects.length > 0 ? (
-            <>
-              <p className="target-hint">Select an object to track (click or say its name):</p>
-              <div className="object-chips">
-                {detectedObjects.map((name) => (
-                  <button
-                    key={name}
-                    className={"chip" + (name === targetObject ? " chip-active" : "")}
-                    onClick={() => selectTarget(name)}
-                  >
-                    {name}
-                  </button>
-                ))}
-              </div>
-            </>
+            <div className="object-chips">
+              {detectedObjects.map((name) => (
+                <button
+                  key={name}
+                  className={"chip" + (name === targetObject ? " chip-active" : "")}
+                  onClick={() => selectTarget(name)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
           ) : (
             <p className="target-hint">
               {isRunning ? 'Waiting for detections...' : 'Detected objects will appear here after starting'}
             </p>
           )}
-          {targetObject && (
-            <p className="target-tip">
-              Current target: <strong>{targetObject}</strong>
-            </p>
-          )}
         </div>
 
-        <div className="status-bar">
-          <span className={"status-dot" + (isRunning ? " active" : "")} />
-          <span>{isRunning ? 'Running' : 'Stopped'}</span>
-        </div>
-
-        {message && <p className="message">{message}</p>}
-
-        {instruction && (
-          <div className="command-card">
-            <span className="command-label">Command</span>
-            <span className="command-text" style={{ fontSize: '1.4rem', fontWeight: 'bold' }}>
-              {instruction}
-            </span>
+        {/* Voice Control */}
+        <div className="voice-card">
+          <div className="voice-card-top">
+            <div className={`voice-status ${getVoiceStatusClass()}`}>
+              <span className="voice-indicator"></span>
+              <span>{getVoiceStatusText()}</span>
+            </div>
+            <button
+              className={`btn-voice-toggle ${isListening ? 'active' : ''}`}
+              onClick={isListening ? stopListening : startListening}
+            >
+              {isListening ? '■ Stop' : '🎤 Start'}
+            </button>
           </div>
-        )}
-
-        <div className="btn-group">
-          <button
-            className="btn btn-start"
-            disabled={isRunning}
-            onClick={handleStart}
-          >
-            {status === 'connecting' ? 'Connecting...' : 'Start'}
-          </button>
-          <button
-            className="btn btn-stop"
-            disabled={!isRunning}
-            onClick={handleStop}
-          >
-            Stop
-          </button>
+          <p className="voice-hint">
+            {isAwake
+              ? '"Where are the [object]?" · "Did I get it?"'
+              : 'Say "Hi Tom" to wake up'}
+          </p>
+          {voiceError && <p className="voice-error">{voiceError}</p>}
         </div>
 
-        <div className="info-card">
-          <h3>Instructions</h3>
-          <ol>
-            <li>Backend must be running on <code>localhost:8000</code></li>
-            <li>DroidCam must be active on your phone</li>
-            <li>Click Start to connect</li>
-            <li><strong>Voice:</strong> Click "Start Voice", say "Hey Tom" to wake</li>
-            <li>Say an object name to select it, or ask where it is</li>
-            <li>Ask "Did I get it?" to check if you grabbed the object</li>
-          </ol>
+        {/* Conversation History */}
+        <div className="chat-card">
+          <h3 className="chat-title">Conversation</h3>
+          <div className="chat-log">
+            {chatHistory.length === 0 ? (
+              <p className="chat-empty">No conversation yet.</p>
+            ) : (
+              chatHistory.map((msg) => (
+                <div key={msg.id} className={`chat-row chat-row-${msg.role}`}>
+                  <div className={`chat-bubble chat-bubble-${msg.role}`}>
+                    <span className="chat-role">{msg.role === 'user' ? 'You' : 'Tom'}</span>
+                    <span className="chat-text">{msg.text}</span>
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={chatEndRef} />
+          </div>
         </div>
       </div>
     </div>
