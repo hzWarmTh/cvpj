@@ -332,63 +332,57 @@ def _generate_voice_response(intent: IntentResult, current_instruction: str) -> 
     
     if intent.intent_type == IntentResult.WAKE:
         _voice_awake = True
-        result['awake'] = True  # 唤醒时保持唤醒
-        result['response'] = "I'm listening"
+        result['awake'] = True  # 唤醒后保持唤醒，等待命令
+        result['response'] = "I'm listening."
         result['action'] = 'wake'
         logger.info("语音唤醒成功")
-    
-    elif intent.intent_type == IntentResult.SELECT_TARGET:
-        if intent.target:
-            config.TARGET_OBJECT = intent.target
-            result['target'] = intent.target
-            result['response'] = f"Tracking {intent.target}"
-            result['action'] = 'select_target'
-            logger.info(f"语音选择目标: {intent.target}")
-        else:
-            result['response'] = "I didn't catch that."
-        # 回答后休眠
-        _voice_awake = False
-    
+
     elif intent.intent_type == IntentResult.QUERY_LOCATION:
+        # "Where are the [object]?" —— 自动切换目标，检查是否已检测到
         target_name = intent.target or config.TARGET_OBJECT
-        if target_name:
-            if current_instruction and current_instruction not in ["", "Hand not found"]:
-                if "not found" in current_instruction.lower():
-                    result['response'] = f"I can't see the {target_name}."
-                else:
+        if not target_name:
+            result['response'] = "Which object are you looking for?"
+        else:
+            # 检查该物体是否在当前检测列表中
+            detected_names = []
+            for obj in config.detected_objects:
+                name = obj.get('name', '') if isinstance(obj, dict) else str(obj)
+                detected_names.append(name.lower())
+
+            if target_name.lower() not in detected_names:
+                result['response'] = f"I can't find the {target_name}."
+            else:
+                # 设为当前目标，通知前端更新 chip 高亮
+                config.TARGET_OBJECT = target_name
+                result['target'] = target_name
+                result['action'] = 'select_target'
+                # 读出当前字幕内容
+                if current_instruction and current_instruction.lower() not in ("", "hand not found"):
                     result['response'] = current_instruction
-            else:
-                result['response'] = f"Looking for {target_name}."
-        else:
-            result['response'] = "What object?"
-        result['action'] = 'query_location'
-        # 回答后休眠
+                else:
+                    result['response'] = f"I found the {target_name}. Align your hand to it."
+            logger.info(f"语音查询位置: target={target_name}, detected={detected_names}, response='{result['response']}'")
         _voice_awake = False
-    
+
     elif intent.intent_type == IntentResult.QUERY_GRASP:
-        if current_instruction:
-            if "grasp" in current_instruction.lower():
-                result['response'] = "Yes, you got it!"
-            elif "not found" in current_instruction.lower():
-                result['response'] = "I don't see it."
-            else:
-                result['response'] = "Not yet."
+        # "Did I get it?" —— 根据当前字幕内容完整回复
+        target = config.TARGET_OBJECT or "the object"
+        if not current_instruction or current_instruction.lower() in ("", "hand not found"):
+            result['response'] = f"I can't tell. I don't see your hand or {target}."
+        elif "grasp" in current_instruction.lower():
+            result['response'] = f"Yes! You've got the {target}!"
+        elif "not found" in current_instruction.lower():
+            result['response'] = f"Not yet. I can't see the {target}."
         else:
-            result['response'] = "Not tracking."
+            result['response'] = f"Not yet. {current_instruction}."
         result['action'] = 'query_grasp'
-        # 回答后休眠
+        logger.info(f"语音查询抓取: instruction='{current_instruction}', response='{result['response']}'")
         _voice_awake = False
-    
-    elif intent.intent_type == IntentResult.STOP:
-        _voice_awake = False
-        result['response'] = "Okay."
-        result['action'] = 'stop'
-        logger.info("语音停止/休眠")
-    
+
     else:
+        # 未识别到有效命令
         if _voice_awake:
-            result['response'] = "Say an object name or ask where it is."
-            # 没理解时也休眠
+            result['response'] = 'Say "Where are the [object]?" or "Did I get it?"'
             _voice_awake = False
     
     return result
@@ -429,11 +423,14 @@ async def websocket_voice(websocket: WebSocket):
             if msg_type == 'wake':
                 _voice_awake = True
                 logger.info("语音唤醒")
-                continue
-            
-            if msg_type == 'sleep':
-                _voice_awake = False
-                logger.info("语音休眠")
+                await websocket.send_json({
+                    'type': 'intent',
+                    'intent': 'wake',
+                    'response': "I'm listening.",
+                    'action': 'wake',
+                    'target': None,
+                    'awake': True
+                })
                 continue
             
             if msg_type == 'text':

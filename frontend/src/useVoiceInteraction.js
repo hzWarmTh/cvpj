@@ -18,8 +18,9 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
 
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
-  const isListeningRef = useRef(false);  // 使用 ref 避免闪包问题
+  const isListeningRef = useRef(false);  // 使用 ref 避免闭包问题
   const isAwakeRef = useRef(false);
+  const isTTSActiveRef = useRef(false);  // TTS 播放期间为 true，阻止识别重启
 
   // 同步 ref
   useEffect(() => {
@@ -30,22 +31,17 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
     isAwakeRef.current = isAwake;
   }, [isAwake]);
 
-  // 唤醒词列表
-  const WAKE_WORDS = ['hey tom', 'hi tom', 'hello tom', 'tom', 'wake up', 'hello', 'hey'];
-  
-  // 停止词
-  const STOP_WORDS = ['stop', 'cancel', 'quit', 'exit', 'sleep'];
+  // 唤醒词列表（仅 hi/hey/hello tom 及常见 Whisper 误识别）
+  const WAKE_WORDS = [
+    'hi tom', 'hey tom', 'hello tom',
+    'hi time', 'hey time', 'hi tim', 'hey tim',
+    'hi tam', 'hey tam', 'hi tong', 'hey tong',
+  ];
 
   // 检查是否匹配唤醒词
   const checkWakeWord = useCallback((text) => {
     const lower = text.toLowerCase().trim();
     return WAKE_WORDS.some(word => lower.includes(word));
-  }, []);
-
-  // 检查停止词
-  const checkStopWord = useCallback((text) => {
-    const lower = text.toLowerCase().trim();
-    return STOP_WORDS.some(word => lower.includes(word));
   }, []);
 
   // 处理语音识别结果
@@ -58,10 +54,7 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
     // 检查唤醒词
     if (checkWakeWord(text)) {
       setIsAwake(true);
-      if (onResponse) {
-        onResponse("I'm listening");
-      }
-      // 发送到后端同步唤醒状态
+      // 发送到后端同步唤醒状态并获取 "I'm listening" 响应
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'wake' }));
       }
@@ -73,26 +66,14 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
       return;
     }
 
-    // 检查停止词
-    if (checkStopWord(text)) {
-      setIsAwake(false);
-      if (onResponse) {
-        onResponse("Okay.");
-      }
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'sleep' }));
-      }
-      return;
-    }
-
-    // 发送到后端处理意图，回答后自动休眠
+    // 发送到后端处理意图，回答后自动休眠（后端返回 awake: false）
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ 
+      wsRef.current.send(JSON.stringify({
         type: 'text',
-        text: text 
+        text: text
       }));
     }
-  }, [isAwake, checkWakeWord, checkStopWord, onResponse]);
+  }, [isAwake, checkWakeWord, onResponse]);
 
   // 初始化 Web Speech API
   const initSpeechRecognition = useCallback(() => {
@@ -132,27 +113,26 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
       if (event.error !== 'no-speech' && event.error !== 'aborted') {
         setError(`Speech error: ${event.error}`);
       }
-      // 出错后也尝试重启
+      // TTS 播放期间的 abort/no-speech 是正常现象，不重启
+      if (isTTSActiveRef.current) return;
       if (event.error === 'no-speech' && isListeningRef.current) {
         setTimeout(() => {
-          if (recognitionRef.current && isListeningRef.current) {
+          if (recognitionRef.current && isListeningRef.current && !isTTSActiveRef.current) {
             try {
               recognitionRef.current.start();
-              console.log('Speech recognition restarted after no-speech');
-            } catch (e) {
-              // 忽略
-            }
+            } catch (e) { /* 忽略 */ }
           }
         }, 100);
       }
     };
 
     recognition.onend = () => {
-      console.log('Speech recognition ended, isListening:', isListeningRef.current);
-      // 自动重启（使用 ref 避免闭包问题）
+      console.log('Speech recognition ended, isTTSActive:', isTTSActiveRef.current);
+      // TTS 播放期间停止识别是预期行为，不自动重启
+      if (isTTSActiveRef.current) return;
       if (isListeningRef.current && recognitionRef.current) {
         setTimeout(() => {
-          if (recognitionRef.current && isListeningRef.current) {
+          if (recognitionRef.current && isListeningRef.current && !isTTSActiveRef.current) {
             try {
               recognitionRef.current.start();
               console.log('Speech recognition restarted');
@@ -240,6 +220,29 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
     }
   }, [connectWebSocket, initSpeechRecognition]);
 
+  // TTS 开始前暂停识别（阻止麦克风收到 TTS 输出）
+  const pauseForTTS = useCallback(() => {
+    isTTSActiveRef.current = true;
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) { /* 忽略 */ }
+    }
+  }, []);
+
+  // TTS 播放结束后恢复识别
+  const resumeFromTTS = useCallback(() => {
+    isTTSActiveRef.current = false;
+    if (recognitionRef.current && isListeningRef.current) {
+      setTimeout(() => {
+        if (recognitionRef.current && isListeningRef.current && !isTTSActiveRef.current) {
+          try {
+            recognitionRef.current.start();
+            console.log('Speech recognition resumed after TTS');
+          } catch (e) { /* 忽略 */ }
+        }
+      }, 300); // 额外 300ms 缓冲，防止 TTS 尾音被录入
+    }
+  }, []);
+
   // 停止语音监听
   const stopListening = useCallback(() => {
     if (recognitionRef.current) {
@@ -288,6 +291,8 @@ export function useVoiceInteraction({ onTargetSelected, onResponse }) {
     error,
     startListening,
     stopListening,
+    pauseForTTS,
+    resumeFromTTS,
   };
 }
 
